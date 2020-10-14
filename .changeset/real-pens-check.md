@@ -2,4 +2,4 @@
 'microbundle': minor
 ---
 
-Upgrade rollup to version latest and upgrade all its dependencies
+Upgrade rollup to the latest version and upgrade all other dependencies
