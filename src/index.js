@@ -6,7 +6,6 @@ import { blue } from 'kleur';
 import { map, series } from 'asyncro';
 import glob from 'tiny-glob/sync';
 import autoprefixer from 'autoprefixer';
-import cssnano from 'cssnano';
 import { rollup, watch } from 'rollup';
 import builtinModules from 'builtin-modules';
 import commonjs from '@rollup/plugin-commonjs';
@@ -83,6 +82,8 @@ export default async function microbundle(inputOptions) {
 	options.multipleEntries = options.entries.length > 1;
 
 	let formats = (options.format || options.formats).split(',');
+	// de-dupe formats and convert "esm" to "es":
+	formats = Array.from(new Set(formats.map(f => (f === 'esm' ? 'es' : f))));
 	// always compile cjs first if it's there:
 	formats.sort((a, b) => (a === 'cjs' ? -1 : a > b ? 1 : 0));
 
@@ -293,16 +294,10 @@ function createConfig(options, entry, format, writeMeta) {
 	let { pkg } = options;
 
 	/** @type {(string|RegExp)[]} */
-	let external = ['dns', 'fs', 'path', 'url'].concat(
-		options.entries.filter(e => e !== entry),
-	);
+	let external = ['dns', 'fs', 'path', 'url'];
 
 	/** @type {Record<string, string>} */
 	let outputAliases = {};
-	// since we transform src/index.js, we need to rename imports for it:
-	if (options.multipleEntries) {
-		outputAliases['.'] = './' + basename(options.output);
-	}
 
 	const moduleAliases = options.alias ? parseAliasArgument(options.alias) : [];
 	const aliasIds = moduleAliases.map(alias => alias.find);
@@ -405,38 +400,47 @@ function createConfig(options, entry, format, writeMeta) {
 		inputOptions: {
 			// disable Rollup's cache for the modern build to prevent re-use of legacy transpiled modules:
 			cache,
-
 			input: entry,
 			external: id => {
 				if (id === 'babel-plugin-transform-async-to-promises/helpers') {
 					return false;
 				}
-				if (options.multipleEntries && id === '.') {
-					return true;
-				}
+
 				if (aliasIds.indexOf(id) >= 0) {
 					return false;
 				}
 				return externalTest(id);
 			},
+
+			onwarn(warning, warn) {
+				// https://github.com/rollup/rollup/blob/0fa9758cb7b1976537ae0875d085669e3a21e918/src/utils/error.ts#L324
+				if (warning.code === 'UNRESOLVED_IMPORT') {
+					stdout(
+						`Failed to resolve the module ${warning.source} imported by ${warning.importer}` +
+							`\nIs the module installed? Note:` +
+							`\n ↳ to inline a module into your bundle, install it to "devDependencies".` +
+							`\n ↳ to depend on a module via import/require, install it to "dependencies".`,
+					);
+					return;
+				}
+
+				warn(warning);
+			},
+
 			treeshake: {
 				propertyReadSideEffects: false,
 			},
+
 			plugins: []
 				.concat(
 					postcss({
-						plugins: [
-							autoprefixer(),
-							options.compress !== false &&
-								cssnano({
-									preset: 'default',
-								}),
-						].filter(Boolean),
+						plugins: [autoprefixer()],
 						autoModules: shouldCssModules(options),
 						modules: cssModulesConfig(options),
 						// only write out CSS for the first bundle (avoids pointless extra files):
 						inject: false,
 						extract: !!writeMeta,
+						minimize: options.compress,
 					}),
 					moduleAliases.length > 0 &&
 						alias({
@@ -521,11 +525,11 @@ function createConfig(options, entry, format, writeMeta) {
 							pragma: options.jsx || 'h',
 							pragmaFrag: options.jsxFragment || 'Fragment',
 							typescript: !!useTypescript,
+							jsxImportSource: options.jsxImportSource || false,
 						},
 					}),
 					options.compress !== false && [
 						terser({
-							sourcemap: true,
 							compress: Object.assign(
 								{
 									keep_infinity: true,
@@ -564,7 +568,7 @@ function createConfig(options, entry, format, writeMeta) {
 						},
 					],
 					{
-						writeBundle(bundle) {
+						writeBundle(_, bundle) {
 							config._sizeInfo = Promise.all(
 								Object.values(bundle).map(({ code, fileName }) => {
 									if (code) {
@@ -594,6 +598,7 @@ function createConfig(options, entry, format, writeMeta) {
 			extend: /^global\./.test(options.name),
 			dir: outputDir,
 			entryFileNames: outputEntryFileName,
+			exports: 'auto',
 		},
 	};
 
